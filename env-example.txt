@@ -1,0 +1,11 @@
+# MongoDB Configuration
+MONGO_URI=mongodb+srv://<username>:<password>@<cluster>.mongodb.net/?retryWrites=true&w=majority&appName=<appName>
+
+# Public base URL (Railway/custom domain). Used to print webhook URLs.
+PUBLIC_URL=https://<your-app>.up.railway.app
+
+# Twilio Configuration
+TWILIO_ACCOUNT_SID=your_twilio_account_sid_here
+TWILIO_AUTH_TOKEN=your_twilio_auth_token_here
+TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886
+

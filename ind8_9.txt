@@ -1,0 +1,422 @@
+import express from "express";
+import bodyParser from "body-parser";
+import twilio from "twilio";
+import { MongoClient } from "mongodb";
+import dotenv from "dotenv";
+import ngrok from "@ngrok/ngrok";
+
+dotenv.config();
+
+const app = express();
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: false }));
+
+// ✅ Twilio client
+const client = new twilio(
+  process.env.TWILIO_ACCOUNT_SID,
+  process.env.TWILIO_AUTH_TOKEN
+);
+
+// ✅ MongoDB connection
+const mongo = new MongoClient(process.env.MONGO_URI);
+let leadsCollection;
+let messagesCollection;
+
+(async () => {
+  await mongo.connect();
+  leadsCollection = mongo.db("jewelleryCRM").collection("leads");
+  messagesCollection = mongo.db("jewelleryCRM").collection("messages");
+})();
+
+// ✅ Send Main Menu
+async function sendMainMenu(to) {
+  await client.messages.create({
+    from: process.env.TWILIO_WHATSAPP_NUMBER,
+    to,
+    body: `✨ Welcome to Trichy Gold Jewellers! ✨
+
+Please select your desired option:
+
+1️⃣ Query about Product
+2️⃣ Explore Schemes  
+3️⃣ Gold Rates
+4️⃣ End Chat
+
+Type the number (1-4) to select.`
+  });
+  console.log("✅ Main menu sent successfully");
+}
+
+// ✅ Send Items Menu
+async function sendItemsMenu(to) {
+  await client.messages.create({
+    from: process.env.TWILIO_WHATSAPP_NUMBER,
+    to,
+    body: `Select the jewellery item you are interested in:
+
+1️⃣ Bangle
+2️⃣ Chain
+3️⃣ Necklace
+4️⃣ Earring
+5️⃣ Ring
+6️⃣ Pendant Set
+7️⃣ Stud
+8️⃣ Mangal Sutra
+9️⃣ Band Ring
+
+Type the number (1-9) or the item name to select.`
+  });
+  console.log("✅ Items menu sent successfully");
+}
+
+// ✅ Prompt for Name
+async function promptForName(to) {
+  await client.messages.create({
+    from: process.env.TWILIO_WHATSAPP_NUMBER,
+    to,
+    body: "Please enter your name:"
+  });
+}
+
+// ✅ Prompt for Details
+async function promptForDetails(to) {
+  await client.messages.create({
+    from: process.env.TWILIO_WHATSAPP_NUMBER,
+    to,
+    body: "You can post multiple media/voice/text to further qualify your query.Type 'end' when finished."
+  });
+}
+
+// ✅ Save Item Selection and Set State to Name
+async function saveItemSelection(to, item) {
+  await leadsCollection.updateOne(
+    { mobile: to },
+    { $set: { productInterested: item, state: "name" } },
+    { upsert: true }
+  );
+  
+  // Send confirmation message
+  await client.messages.create({
+    from: process.env.TWILIO_WHATSAPP_NUMBER,
+    to,
+    body: `✅ Great! You are interested in ${item}.`
+  });
+  
+  await promptForName(to);
+}
+
+// ✅ Store Detail Message
+async function storeDetail(to, msg) {
+  const detail = { timestamp: new Date() };
+  
+  if (msg.Body) {
+    detail.type = "text";
+    detail.content = msg.Body;
+  } else if (msg.NumMedia > 0) {
+    // Handle first media for simplicity; loop for multiple if needed
+    const mediaType = msg.MediaContentType0;
+    detail.content = msg.MediaUrl0;
+    if (mediaType.startsWith("image/")) {
+      detail.type = "image";
+    } else if (mediaType.startsWith("audio/")) {
+      detail.type = "voice";
+    } else {
+      detail.type = "media";
+    }
+  }
+
+  if (detail.type) {
+    await leadsCollection.updateOne(
+      { mobile: to },
+      { $push: { details: detail } }
+    );
+  }
+
+  await promptForDetails(to); // Ask for more
+}
+
+// ✅ Handle Incoming Message
+async function handleIncomingMessage(msg) {
+  const from = msg.From;
+  const body = msg.Body ? msg.Body.toLowerCase() : "";
+  const numMedia = parseInt(msg.NumMedia || 0);
+
+  let lead = await leadsCollection.findOne({ mobile: from });
+
+  if (!lead) {
+    lead = {
+      name: null,
+      mobile: from,
+      typeofquery: null,
+      productInterested: null,
+      handover: false,
+      state: "main",
+      details: [],
+      createdAt: new Date()
+    };
+    await leadsCollection.insertOne(lead);
+  }
+
+  if (lead.handover) {
+    // Bot silent, store in messages collection
+    const newMessage = { timestamp: new Date(), from: "customer" };
+    
+    if (body) {
+      newMessage.type = "text";
+      newMessage.content = msg.Body;
+    } else if (numMedia > 0) {
+      newMessage.type = msg.MediaContentType0.startsWith("image/") ? "image" : msg.MediaContentType0.startsWith("audio/") ? "voice" : "media";
+      newMessage.content = msg.MediaUrl0; // Handle first media; extend for multiple
+    }
+
+    if (newMessage.type) {
+      await messagesCollection.updateOne(
+        { mobile: from },
+        { $push: { messages: newMessage } },
+        { upsert: true }
+      );
+    }
+    return; // No response
+  }
+
+  // Handle based on state
+  if (lead.state === "name") {
+    await leadsCollection.updateOne(
+      { mobile: from },
+      { $set: { name: msg.Body, state: "details" } }
+    );
+    await promptForDetails(from);
+    return;
+  }
+
+  if (lead.state === "details") {
+    if (body === "end") {
+      await leadsCollection.updateOne(
+        { mobile: from },
+        { $set: { handover: true, state: null } }
+      );
+      await client.messages.create({
+        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        to: from,
+        body: "Thank you! Our team will contact you soon. 💎"
+      });
+    } else {
+      await storeDetail(from, msg);
+    }
+    return;
+  }
+
+  // Only handle main menu selections if in main state
+  if (lead.state === "main") {
+    let choice;
+    if (msg.Interactive && msg.Interactive.ListReply) {
+      choice = msg.Interactive.ListReply.Id;
+    } else if (msg.ButtonText) {
+      choice = msg.ButtonText.toLowerCase();
+    } else {
+      choice = body;
+    }
+
+    // Map numbers to choices
+    if (choice === "1" || choice === "product" || choice.includes("query about product")) {
+      await leadsCollection.updateOne(
+        { mobile: from },
+        { $set: { typeofquery: "product" } }
+      );
+      await sendItemsMenu(from);
+    } else if (choice === "2" || choice === "schemes" || choice.includes("explore schemes")) {
+      await leadsCollection.updateOne(
+        { mobile: from },
+        { $set: { typeofquery: "schemes" } }
+      );
+      await client.messages.create({
+        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        to: from,
+        body: "We have exciting saving schemes! Our team will contact you with details."
+      });
+      await sendMainMenu(from); // Loop back
+    } else if (choice === "3" || choice === "rates" || choice.includes("gold rates")) {
+      await leadsCollection.updateOne(
+        { mobile: from },
+        { $set: { typeofquery: "rates" } }
+      );
+      await client.messages.create({
+        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        to: from,
+        body: "Today's 22k Gold Rate: ₹5,200/gm."
+      });
+      await sendMainMenu(from); // Loop back
+    } else if (choice === "4" || choice === "end" || choice.includes("end")) {
+      await leadsCollection.updateOne(
+        { mobile: from },
+        { $set: { handover: true, state: null } }
+      );
+      await client.messages.create({
+        from: process.env.TWILIO_WHATSAPP_NUMBER,
+        to: from,
+        body: "Thank you for contacting Trichy Gold Jewellers! 💎"
+      });
+    } else {
+      // Handle item selections (assuming from items menu)
+      const itemsMap = {
+        "1": "bangle",
+        "bangle": "bangle",
+        "2": "chain",
+        "chain": "chain",
+        "3": "necklace",
+        "necklace": "necklace",
+        "4": "earring",
+        "earring": "earring",
+        "5": "ring",
+        "ring": "ring",
+        "6": "pendant set",
+        "pendant": "pendant set",
+        "7": "stud",
+        "stud": "stud",
+        "8": "mangal sutra",
+        "mangalsutra": "mangal sutra",
+        "9": "band ring",
+        "band": "band ring"
+      };
+
+      const item = itemsMap[choice];
+      if (item) {
+        await saveItemSelection(from, item);
+      } else {
+        // Default: send main menu
+        await sendMainMenu(from);
+      }
+    }
+  } else {
+    // If not in main state, send main menu as fallback
+    await sendMainMenu(from);
+  }
+}
+
+// ✅ Webhook endpoint
+app.post("/whatsapp-webhook", async (req, res) => {
+  console.log("🔥 WEBHOOK CALLED - Someone sent a message!");
+  
+  const msg = req.body;
+  console.log("Full request body:", JSON.stringify(req.body, null, 2));
+
+  await handleIncomingMessage(msg);
+
+  res.sendStatus(200);
+});
+
+// === Simple Web Panel for Salesman ===
+
+// List leads with handover true
+app.get("/panel", async (req, res) => {
+  const leads = await leadsCollection.find({ handover: true }).toArray();
+  let html = `
+    <h1>Sales Panel - Handed Over Leads</h1>
+    <ul>
+  `;
+  leads.forEach(lead => {
+    html += `
+      <li>
+        Mobile: ${lead.mobile} | Name: ${lead.name || 'N/A'} | Type: ${lead.typeofquery} | Product: ${lead.productInterested || 'N/A'}
+        <a href="/chat/${lead.mobile}">View Chat</a>
+      </li>
+    `;
+  });
+  html += `</ul>`;
+  res.send(html);
+});
+
+// View chat for a mobile
+app.get("/chat/:mobile", async (req, res) => {
+  const mobile = req.params.mobile;
+  const lead = await leadsCollection.findOne({ mobile });
+  const convo = await messagesCollection.findOne({ mobile }) || { messages: [] };
+
+  let html = `
+    <h1>Chat for ${mobile} (${lead.name || 'N/A'})</h1>
+    <p>Product Interested: ${lead.productInterested || 'N/A'}</p>
+    <h2>Pre-Handover Details:</h2>
+    <ul>
+  `;
+  (lead.details || []).forEach(d => {
+    if (d.type === "text") {
+      html += `<li>Text: ${d.content}</li>`;
+    } else if (d.type === "image") {
+      html += `<li>Image: <img src="${d.content}" width="200"></li>`;
+    } else if (d.type === "voice") {
+      html += `<li>Voice: <audio controls src="${d.content}"></audio></li>`;
+    }
+  });
+  html += `</ul>`;
+
+  html += `<h2>Post-Handover Messages:</h2><ul>`;
+  convo.messages.forEach(m => {
+    html += `<li>${m.from.toUpperCase()}: `;
+    if (m.type === "text") {
+      html += m.content;
+    } else if (m.type === "image") {
+      html += `<img src="${m.content}" width="200">`;
+    } else if (m.type === "voice") {
+      html += `<audio controls src="${m.content}"></audio>`;
+    }
+    html += `</li>`;
+  });
+  html += `</ul>`;
+
+  html += `
+    <form method="POST" action="/reply/${mobile}">
+      <input type="text" name="message" placeholder="Type reply" required>
+      <button type="submit">Send</button>
+    </form>
+  `;
+  res.send(html);
+});
+
+// Send reply from panel
+app.post("/reply/:mobile", async (req, res) => {
+  const mobile = req.params.mobile;
+  const message = req.body.message;
+
+  // Store in messages
+  await messagesCollection.updateOne(
+    { mobile },
+    { $push: { messages: { from: "salesperson", type: "text", content: message, timestamp: new Date() } } },
+    { upsert: true }
+  );
+
+  // Send via Twilio
+  await client.messages.create({
+    from: process.env.TWILIO_WHATSAPP_NUMBER,
+    to: mobile,
+    body: message
+  });
+
+  res.redirect(`/chat/${mobile}`);
+});
+
+// Test route
+app.get("/whatsapp-webhook", (req, res) => {
+  console.log("✅ Webhook endpoint is accessible!");
+  res.send("Webhook endpoint is working!");
+});
+
+// ✅ Start server with ngrok
+app.listen(3000, async () => {
+  console.log("✅ Server running on http://localhost:3000");
+
+  try {
+  const listener = await ngrok.connect({
+    addr: 3000,
+    authtoken: process.env.NGROK_AUTHTOKEN
+  });
+    
+    console.log(`🌐 Public URL: ${listener.url()}`);
+    console.log(`📱 Webhook URL: ${listener.url()}/whatsapp-webhook`);
+    console.log(`🖥️ Panel URL: ${listener.url()}/panel`);
+    console.log(`\n📋 Copy webhook to Twilio: ${listener.url()}/whatsapp-webhook`);
+    
+  } catch (error) {
+    console.error("❌ Ngrok error:", error.message);
+    console.log("💡 Make sure NGROK_AUTHTOKEN is set in your .env file");
+  }
+});
