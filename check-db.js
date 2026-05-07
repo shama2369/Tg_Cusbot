@@ -12,7 +12,7 @@ async function checkDatabase() {
     await client.connect();
     console.log("✅ Connected to MongoDB!");
     
-    const db = client.db("jewelleryCRM");
+    const db = client.db("jewellerybot");
     
     // Check leads collection
     const leads = await db.collection("leads").find({}).toArray();

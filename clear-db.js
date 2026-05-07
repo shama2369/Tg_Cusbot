@@ -12,7 +12,7 @@ async function clearDatabase() {
     await client.connect();
     console.log("✅ Connected to MongoDB!");
     
-    const db = client.db("jewelleryCRM");
+    const db = client.db("jewellerybot");
     
     // Clear leads collection
     const leadsResult = await db.collection("leads").deleteMany({});

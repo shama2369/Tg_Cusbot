@@ -1435,8 +1435,8 @@ app.get("/whatsapp-webhook", (req, res) => {
 async function start() {
   try {
     await mongo.connect();
-    leadsCollection = mongo.db("jewelleryCRM").collection("leads");
-    messagesCollection = mongo.db("jewelleryCRM").collection("messages");
+    leadsCollection = mongo.db("jewellerybot").collection("leads");
+    messagesCollection = mongo.db("jewellerybot").collection("messages");
     const fixTrue = await leadsCollection.updateMany(
       { handover: "true" },
       { $set: { handover: true } }

@@ -24,8 +24,8 @@ let messagesCollection;
 
 (async () => {
   await mongo.connect();
-  leadsCollection = mongo.db("jewelleryCRM").collection("leads");
-  messagesCollection = mongo.db("jewelleryCRM").collection("messages");
+  leadsCollection = mongo.db("jewellerybot").collection("leads");
+  messagesCollection = mongo.db("jewellerybot").collection("messages");
 })();
 
 // ✅ Send Main Menu
