@@ -292,7 +292,23 @@ async function handleIncomingMessage(msg) {
         { upsert: true }
       );
     }
-    return; // No response
+
+    // UX: don't require special keywords. If the customer messages again,
+    // automatically resume the bot and show the main menu.
+    await leadsCollection.updateOne(
+      { mobile: from },
+      {
+        $set: {
+          handover: false,
+          state: "main",
+          currentQueryType: null,
+          currentQueryId: null,
+          currentProduct: null
+        }
+      }
+    );
+    await sendMainMenu(from);
+    return;
   }
 
   // Handle based on state
