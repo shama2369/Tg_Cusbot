@@ -20,6 +20,7 @@ const client = new twilio(
 const mongo = new MongoClient(process.env.MONGO_URI);
 let leadsCollection;
 let messagesCollection;
+let dbReady = false;
 
 function getPublicBaseUrl() {
   const explicit = process.env.PUBLIC_URL;
@@ -32,6 +33,12 @@ function getPublicBaseUrl() {
   if (railwayDomain) return `https://${railwayDomain}`.replace(/\/+$/, "");
 
   return null;
+}
+
+function requireDbReady(res) {
+  if (dbReady && leadsCollection && messagesCollection) return true;
+  res.status(503).send("Service warming up (DB not ready). Try again shortly.");
+  return false;
 }
 
 /** DB/API may store handover as boolean or string ("true") — both mean bot silent. */
@@ -543,6 +550,8 @@ app.get("/", (req, res) => {
 // ✅ Webhook endpoint
 app.post("/whatsapp-webhook", async (req, res) => {
   console.log("🔥 WEBHOOK CALLED - Someone sent a message!");
+
+  if (!requireDbReady(res)) return;
 
   const msg = req.body;
   console.log("Full request body:", JSON.stringify(req.body, null, 2));
@@ -1432,57 +1441,65 @@ app.get("/whatsapp-webhook", (req, res) => {
 
 
 // ✅ Connect DB first so webhooks never hit undefined leadsCollection
+async function connectDbWithRetry() {
+  const dbName = "jewellerybot";
+  let attempt = 0;
+
+  while (true) {
+    attempt += 1;
+    try {
+      await mongo.connect();
+      leadsCollection = mongo.db(dbName).collection("leads");
+      messagesCollection = mongo.db(dbName).collection("messages");
+
+      const fixTrue = await leadsCollection.updateMany(
+        { handover: "true" },
+        { $set: { handover: true } }
+      );
+      const fixFalse = await leadsCollection.updateMany(
+        { handover: "false" },
+        { $set: { handover: false } }
+      );
+      if (fixTrue.modifiedCount > 0 || fixFalse.modifiedCount > 0) {
+        console.log(
+          `✅ Normalized handover field types (${fixTrue.modifiedCount} true, ${fixFalse.modifiedCount} false)`
+        );
+      }
+
+      const na = await leadsCollection.updateMany(
+        { productQueries: null },
+        { $set: { productQueries: [] } }
+      );
+      const ns = await leadsCollection.updateMany(
+        { schemesQueries: null },
+        { $set: { schemesQueries: [] } }
+      );
+      const nr = await leadsCollection.updateMany(
+        { ratesQueries: null },
+        { $set: { ratesQueries: [] } }
+      );
+      if (na.modifiedCount + ns.modifiedCount + nr.modifiedCount > 0) {
+        console.log(
+          `✅ Normalized null query arrays → [] (${na.modifiedCount + ns.modifiedCount + nr.modifiedCount} leads)`
+        );
+      }
+
+      dbReady = true;
+      console.log("✅ MongoDB connected");
+      return;
+    } catch (e) {
+      dbReady = false;
+      const waitMs = Math.min(30_000, 1000 * 2 ** Math.min(attempt, 5));
+      console.error(
+        `❌ MongoDB connection failed (attempt ${attempt}). Retrying in ${waitMs}ms. Error:`,
+        e?.message || e
+      );
+      await new Promise((r) => setTimeout(r, waitMs));
+    }
+  }
+}
+
 async function start() {
-  try {
-    await mongo.connect();
-    leadsCollection = mongo.db("jewellerybot").collection("leads");
-    messagesCollection = mongo.db("jewellerybot").collection("messages");
-    const fixTrue = await leadsCollection.updateMany(
-      { handover: "true" },
-      { $set: { handover: true } }
-    );
-    const fixFalse = await leadsCollection.updateMany(
-      { handover: "false" },
-      { $set: { handover: false } }
-    );
-    if (fixTrue.modifiedCount > 0 || fixFalse.modifiedCount > 0) {
-      console.log(
-        `✅ Normalized handover field types (${fixTrue.modifiedCount} true, ${fixFalse.modifiedCount} false)`
-      );
-    }
-    const na = await leadsCollection.updateMany(
-      { productQueries: null },
-      { $set: { productQueries: [] } }
-    );
-    const ns = await leadsCollection.updateMany(
-      { schemesQueries: null },
-      { $set: { schemesQueries: [] } }
-    );
-    const nr = await leadsCollection.updateMany(
-      { ratesQueries: null },
-      { $set: { ratesQueries: [] } }
-    );
-    if (na.modifiedCount + ns.modifiedCount + nr.modifiedCount > 0) {
-      console.log(
-        `✅ Normalized null query arrays → [] (${na.modifiedCount + ns.modifiedCount + nr.modifiedCount} leads)`
-      );
-    }
-    console.log("✅ MongoDB connected");
-  } catch (e) {
-    console.error("❌ MongoDB connection failed:", e.message);
-    process.exit(1);
-  }
-
-  const wn = process.env.TWILIO_WHATSAPP_NUMBER || "";
-  if (!wn.startsWith("whatsapp:")) {
-    console.warn(
-      "⚠️  TWILIO_WHATSAPP_NUMBER should look like whatsapp:+14155238886 (include whatsapp: prefix for WhatsApp)."
-    );
-  } else {
-    console.log("📞 Outbound WhatsApp From:", wn);
-  }
-  console.log("💡 Stuck with no bot replies? WhatsApp: type menu or reset — or you chose 4 (handover).");
-
   const port = Number.parseInt(process.env.PORT || "3000", 10);
   const host = process.env.HOST || "0.0.0.0";
 
@@ -1501,6 +1518,19 @@ async function start() {
       );
     }
   });
+
+  // DB connects in background (prevents Railway "connection refused" if DB is down).
+  connectDbWithRetry();
+
+  const wn = process.env.TWILIO_WHATSAPP_NUMBER || "";
+  if (!wn.startsWith("whatsapp:")) {
+    console.warn(
+      "⚠️  TWILIO_WHATSAPP_NUMBER should look like whatsapp:+14155238886 (include whatsapp: prefix for WhatsApp)."
+    );
+  } else {
+    console.log("📞 Outbound WhatsApp From:", wn);
+  }
+  console.log("💡 Stuck with no bot replies? WhatsApp: type menu or reset — or you chose 4 (handover).");
 }
 
 start();
