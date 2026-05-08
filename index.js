@@ -274,7 +274,7 @@ async function handleIncomingMessage(msg) {
     console.log(
       "🔇 Handover mode (End Chat) — bot only stores messages. Reply with: menu or reset."
     );
-    // Store message in messages collection
+    // Bot silent, store in messages collection
     const newMessage = { timestamp: new Date(), from: "customer" };
     
     if (body) {
@@ -292,16 +292,7 @@ async function handleIncomingMessage(msg) {
         { upsert: true }
       );
     }
-
-    // Respond with a short instruction so the user isn't stuck in silence.
-    // (Previously we returned no response, which looked like the bot was broken.)
-    await client.messages.create({
-      from: process.env.TWILIO_WHATSAPP_NUMBER,
-      to: from,
-      body: "You’re currently in handover mode. Type 'menu' or 'reset' to continue with the bot."
-    });
-
-    return;
+    return; // No response
   }
 
   // Handle based on state
@@ -571,9 +562,7 @@ app.post("/whatsapp-webhook", async (req, res) => {
     console.error("❌ handleIncomingMessage error:", e);
   }
 
-  // Important: Express' sendStatus(200) writes "OK" in the response body.
-  // Twilio can surface response bodies; keep it empty.
-  res.status(200).end();
+  res.sendStatus(200);
 });
 
 
