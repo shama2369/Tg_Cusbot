@@ -562,7 +562,9 @@ app.post("/whatsapp-webhook", async (req, res) => {
     console.error("❌ handleIncomingMessage error:", e);
   }
 
-  res.sendStatus(200);
+  // Important: Express' sendStatus(200) writes "OK" in the response body.
+  // Twilio can surface response bodies; keep it empty.
+  res.status(200).end();
 });
 
 
